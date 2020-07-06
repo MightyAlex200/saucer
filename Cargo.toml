@@ -1,0 +1,15 @@
+[package]
+name = "saucer"
+version = "0.1.0"
+authors = ["MightyAlex200 <quantumtraveling@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+opencv = {git = "https://github.com/twistedfall/opencv-rust", branch = "ptr", features = ["buildtime-bindgen", "contrib"]}
+tokio = { version = "0.2.21", features = ["full"] }
+futures = "0.3.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+walkdir = "2.3.1"
