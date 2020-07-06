@@ -98,10 +98,8 @@ async fn get_and_compare_cropped<'a>(
     let f = tokio::fs::read_to_string(file.path()).await.ok()?;
     let kpdcache: KPDCache = serde_json::from_str(&f[..]).ok()?;
     let kpd = decode_kpd(kpdcache);
-    let uncropped_bytes: Vector<u8> =
-        Vector::from_iter(tokio::fs::read(&kpd.0[..]).await.ok()?.into_iter());
     // Use FLANN to find homography
-    FLANN.with(|flann| {
+    let matches = FLANN.with(|flann| {
         let mut matches = Vector::new();
         flann
             .knn_train_match(
@@ -113,57 +111,58 @@ async fn get_and_compare_cropped<'a>(
                 false,
             )
             .ok()?;
-
-        let mut good = Vec::new();
-        for matc in matches {
-            // matc is always 2 elements long because of the k value passed to knn_train_match
-            let m = unsafe { matc.get_unchecked(0) };
-            let n = unsafe { matc.get_unchecked(1) };
-            if m.distance < 0.7 * n.distance {
-                good.push(m);
-            }
+        Some(matches)
+    })?;
+    let mut good = Vec::new();
+    for matc in matches {
+        // matc is always 2 elements long because of the k value passed to knn_train_match
+        let m = unsafe { matc.get_unchecked(0) };
+        let n = unsafe { matc.get_unchecked(1) };
+        if m.distance < 0.7 * n.distance {
+            good.push(m);
         }
-        let good = good;
-        if good.is_empty() {
-            return None;
-        }
-        let uncropped_points: Vector<Point2f> = Vector::from_iter(
-            good.iter()
-                .map(|m| kpd.1.get(m.train_idx as usize).unwrap().pt),
-        );
-        let cropped_points: Vector<Point2f> = Vector::from_iter(
-            good.iter()
-                .map(|m| cropped_keypoints.0.get(m.query_idx as usize).unwrap().pt),
-        );
-        // Compare cropped and uncropped
-        let m = find_homography(
-            &cropped_points,
-            &uncropped_points,
-            &mut no_array().unwrap(),
-            RANSAC,
-            5.,
-        )
-        .ok()?;
-        let cropped = cropped.0;
-        let uncropped_image = imdecode(&uncropped_bytes, ImreadModes::IMREAD_COLOR as i32).ok()?;
-        let uncropped_image = uncropped_image;
-        // Unsafe because it exposes uninitialized memory, but we do not access it so there is no UB (🤞)
-        let mut dst =
-            unsafe { Mat::new_rows_cols(cropped.rows(), cropped.cols(), CV_8UC3).unwrap() };
-        warp_perspective(
-            &uncropped_image,
-            &mut dst,
-            &m,
-            cropped.size().unwrap(),
-            WARP_INVERSE_MAP as i32,
-            BORDER_CONSTANT as i32,
-            Scalar::default(),
-        )
-        .ok()?;
-        assert_eq!(dst.typ().unwrap(), cropped.typ().unwrap());
-        let diff = difference_between(&cropped, &dst);
-        Some((kpd.0, diff))
-    })
+    }
+    let good = good;
+    if good.is_empty() {
+        return None;
+    }
+    let uncropped_points: Vector<Point2f> = Vector::from_iter(
+        good.iter()
+            .map(|m| kpd.1.get(m.train_idx as usize).unwrap().pt),
+    );
+    let cropped_points: Vector<Point2f> = Vector::from_iter(
+        good.iter()
+            .map(|m| cropped_keypoints.0.get(m.query_idx as usize).unwrap().pt),
+    );
+    // Compare cropped and uncropped
+    let m = find_homography(
+        &cropped_points,
+        &uncropped_points,
+        &mut no_array().unwrap(),
+        RANSAC,
+        5.,
+    )
+    .ok()?;
+    let uncropped_bytes: Vector<u8> =
+        Vector::from_iter(tokio::fs::read(&kpd.0[..]).await.ok()?.into_iter());
+    let cropped = cropped.0;
+    let uncropped_image = imdecode(&uncropped_bytes, ImreadModes::IMREAD_COLOR as i32).ok()?;
+    let uncropped_image = uncropped_image;
+    // Unsafe because it exposes uninitialized memory, but we do not access it so there is no UB (🤞)
+    let mut dst = unsafe { Mat::new_rows_cols(cropped.rows(), cropped.cols(), CV_8UC3).unwrap() };
+    warp_perspective(
+        &uncropped_image,
+        &mut dst,
+        &m,
+        cropped.size().unwrap(),
+        WARP_INVERSE_MAP as i32,
+        BORDER_CONSTANT as i32,
+        Scalar::default(),
+    )
+    .ok()?;
+    assert_eq!(dst.typ().unwrap(), cropped.typ().unwrap());
+    let diff = difference_between(&cropped, &dst);
+    Some((kpd.0, diff))
 }
 
 async fn get_uncropped(cropped: Mat) -> Option<(String, f64)> {
