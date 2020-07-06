@@ -233,7 +233,8 @@ async fn get_uncropped(cropped: Mat) -> Option<(String, f64)> {
 #[tokio::main]
 async fn main() {
     let start = Instant::now();
-    let cropped = opencv::imgcodecs::imread("snivy.png", ImreadModes::IMREAD_COLOR as i32).unwrap();
+    let cropped =
+        opencv::imgcodecs::imread("cropped.png", ImreadModes::IMREAD_COLOR as i32).unwrap();
     match get_uncropped(cropped).await {
         Some((filename, avg_diff)) => {
             let stop = Instant::now();
