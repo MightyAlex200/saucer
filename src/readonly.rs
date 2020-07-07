@@ -8,6 +8,7 @@ use opencv::{
 
 pub struct ReadOnlyMat(Mat);
 
+#[allow(dead_code)]
 impl ReadOnlyMat {
     pub fn new(inner: Mat) -> Self {
         Self(inner)
@@ -58,6 +59,7 @@ where
     T: VectorElement,
     Vector<T>: VectorExtern<T>;
 
+#[allow(dead_code)]
 impl<T: VectorElement> ReadOnlyVector<T>
 where
     Vector<T>: VectorExtern<T>,
