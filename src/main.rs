@@ -15,7 +15,7 @@ use opencv::{
 };
 use readonly::{ReadOnlyMat, ReadOnlyVector};
 use serde::Deserialize;
-use std::{thread_local, time::Instant};
+use std::{sync::Arc, thread_local, time::Instant};
 use tokio::{stream::StreamExt, sync::Semaphore};
 use walkdir::{DirEntry, WalkDir};
 
@@ -86,9 +86,9 @@ thread_local! {
 
 async fn get_and_compare_cropped<'a>(
     file: DirEntry,
-    cropped: &ReadOnlyMat,
-    cropped_keypoints: &ReadOnlyVector<KeyPoint>,
-    descriptors: &ReadOnlyMat,
+    cropped: Arc<ReadOnlyMat>,
+    cropped_keypoints: Arc<ReadOnlyVector<KeyPoint>>,
+    descriptors: Arc<ReadOnlyMat>,
 ) -> Option<(String, f64)> {
     let cache_permit = CACHE_SEMAPHORE.acquire().await;
     // Read file
@@ -100,7 +100,7 @@ async fn get_and_compare_cropped<'a>(
         let mut matches = Vector::new();
         flann
             .knn_train_match(
-                descriptors,
+                &*descriptors,
                 &kpd.2,
                 &mut matches,
                 2,
@@ -158,7 +158,7 @@ async fn get_and_compare_cropped<'a>(
     )
     .ok()?;
     assert_eq!(dst.typ().unwrap(), cropped.typ().unwrap());
-    let diff = difference_between(cropped, &dst, cropped.rows(), cropped.cols());
+    let diff = difference_between(&*cropped, &dst, cropped.rows(), cropped.cols());
     drop(cache_permit);
     drop(permit);
     Some((kpd.0, diff))
@@ -184,18 +184,21 @@ async fn get_uncropped(cropped: Mat) -> Option<(String, f64)> {
         false,
     )
     .unwrap();
-    let cropped = ReadOnlyMat::new(cropped);
-    let keypoints = ReadOnlyVector::new(keypoints);
-    let descriptors = ReadOnlyMat::new(descriptors);
+    let cropped = Arc::new(ReadOnlyMat::new(cropped));
+    let keypoints = Arc::new(ReadOnlyVector::new(keypoints));
+    let descriptors = Arc::new(ReadOnlyMat::new(descriptors));
 
     // Spawn many tasks
     let tasks = FuturesUnordered::new();
     for file in files {
+        let cropped_ref = cropped.clone();
+        let keypoints_ref = keypoints.clone();
+        let descriptors_ref = descriptors.clone();
         let handle = tokio::spawn(get_and_compare_cropped(
             file,
-            &cropped,
-            &keypoints,
-            &descriptors,
+            cropped_ref,
+            keypoints_ref,
+            descriptors_ref,
         ));
         tasks.push(handle);
     }
