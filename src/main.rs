@@ -4,7 +4,8 @@ use opencv::prelude::*;
 use opencv::{
     calib3d::{find_homography, RANSAC},
     core::{
-        no_array, norm2, KeyPoint, Point2f, Ptr, Scalar, Vector, BORDER_CONSTANT, CV_8UC3, NORM_L2,
+        no_array, norm2, KeyPoint, Point2f, Ptr, Scalar, ToInputArray, Vector, BORDER_CONSTANT,
+        CV_8UC3, NORM_L2,
     },
     features2d::FlannBasedMatcher,
     flann::{IndexParams, SearchParams, FLANN_INDEX_KDTREE},
@@ -12,10 +13,13 @@ use opencv::{
     imgproc::{warp_perspective, WARP_INVERSE_MAP},
     xfeatures2d::SIFT,
 };
+use readonly::{ReadOnlyMat, ReadOnlyVector};
 use serde::Deserialize;
 use std::{thread_local, time::Instant};
 use tokio::{stream::StreamExt, sync::Semaphore};
 use walkdir::{DirEntry, WalkDir};
+
+mod readonly;
 
 const MAX_CACHE_LOADED: usize = 100;
 const MAX_IMAGES_LOADED: usize = 30;
@@ -24,28 +28,6 @@ lazy_static! {
     static ref CACHE_SEMAPHORE: Semaphore = Semaphore::new(MAX_CACHE_LOADED);
     static ref IMAGE_LOAD_SEMAPHORE: Semaphore = Semaphore::new(MAX_IMAGES_LOADED);
 }
-
-#[derive(Copy, Clone)]
-struct MatPtr<'a>(&'a Mat);
-
-impl<'a> MatPtr<'a> {
-    unsafe fn new(mat: &'a Mat) -> Self {
-        Self(mat)
-    }
-}
-
-unsafe impl Send for MatPtr<'_> {}
-
-#[derive(Copy, Clone)]
-struct KeyPointsPtr<'a>(&'a Vector<KeyPoint>);
-
-impl<'a> KeyPointsPtr<'a> {
-    unsafe fn new(kp: &'a Vector<KeyPoint>) -> Self {
-        Self(kp)
-    }
-}
-
-unsafe impl Send for KeyPointsPtr<'_> {}
 
 fn new_sift() -> Ptr<SIFT> {
     SIFT::create(0, 3, 0.04, 10., 1.6).unwrap()
@@ -79,9 +61,14 @@ fn decode_kpd(cache: KPDCache) -> (String, Vector<KeyPoint>, Mat) {
     )
 }
 
-fn difference_between(src1: &Mat, src2: &Mat) -> f64 {
-    let error = norm2(&src1, &src2, NORM_L2, &no_array().unwrap()).unwrap();
-    let similarity = error / (src1.rows() * src1.cols()) as f64;
+fn difference_between(
+    src1: &dyn ToInputArray,
+    src2: &dyn ToInputArray,
+    rows: i32,
+    cols: i32,
+) -> f64 {
+    let error = norm2(src1, src2, NORM_L2, &no_array().unwrap()).unwrap();
+    let similarity = error / (rows * cols) as f64;
     similarity
 }
 
@@ -99,9 +86,9 @@ thread_local! {
 
 async fn get_and_compare_cropped<'a>(
     file: DirEntry,
-    cropped: MatPtr<'a>,
-    cropped_keypoints: KeyPointsPtr<'a>,
-    descriptors: MatPtr<'a>,
+    cropped: &ReadOnlyMat,
+    cropped_keypoints: &ReadOnlyVector<KeyPoint>,
+    descriptors: &ReadOnlyMat,
 ) -> Option<(String, f64)> {
     let cache_permit = CACHE_SEMAPHORE.acquire().await;
     // Read file
@@ -113,7 +100,7 @@ async fn get_and_compare_cropped<'a>(
         let mut matches = Vector::new();
         flann
             .knn_train_match(
-                &descriptors.0,
+                descriptors,
                 &kpd.2,
                 &mut matches,
                 2,
@@ -142,7 +129,7 @@ async fn get_and_compare_cropped<'a>(
     );
     let cropped_points: Vector<Point2f> = Vector::from_iter(
         good.iter()
-            .map(|m| cropped_keypoints.0.get(m.query_idx as usize).unwrap().pt),
+            .map(|m| cropped_keypoints.get(m.query_idx as usize).unwrap().pt),
     );
     // Compare cropped and uncropped
     let m = find_homography(
@@ -156,7 +143,6 @@ async fn get_and_compare_cropped<'a>(
     let permit = IMAGE_LOAD_SEMAPHORE.acquire().await;
     let uncropped_bytes: Vector<u8> =
         Vector::from_iter(tokio::fs::read(&kpd.0[..]).await.ok()?.into_iter());
-    let cropped = cropped.0;
     let uncropped_image = imdecode(&uncropped_bytes, ImreadModes::IMREAD_COLOR as i32).ok()?;
     let uncropped_image = uncropped_image;
     // Unsafe because it exposes uninitialized memory, but we do not access it so there is no UB (🤞)
@@ -172,7 +158,7 @@ async fn get_and_compare_cropped<'a>(
     )
     .ok()?;
     assert_eq!(dst.typ().unwrap(), cropped.typ().unwrap());
-    let diff = difference_between(&cropped, &dst);
+    let diff = difference_between(cropped, &dst, cropped.rows(), cropped.cols());
     drop(cache_permit);
     drop(permit);
     Some((kpd.0, diff))
@@ -198,25 +184,18 @@ async fn get_uncropped(cropped: Mat) -> Option<(String, f64)> {
         false,
     )
     .unwrap();
-    let keypoints = keypoints;
-    let descriptors = descriptors;
-
-    // This is extremely unsafe, but since Mat isn't Sync it's the best that we can do
-    // Technically this is safe because croppedptr is only used while cropped is still in scope
-    // TODO: ReadOnlyMat wrapper if possible
-    let croppedptr = unsafe { MatPtr::new((&cropped as *const Mat).as_ref().unwrap()) };
-    let descriptorsptr = unsafe { MatPtr::new((&descriptors as *const Mat).as_ref().unwrap()) };
-    let keypointsptr =
-        unsafe { KeyPointsPtr::new((&keypoints as *const Vector<KeyPoint>).as_ref().unwrap()) };
+    let cropped = ReadOnlyMat::new(cropped);
+    let keypoints = ReadOnlyVector::new(keypoints);
+    let descriptors = ReadOnlyMat::new(descriptors);
 
     // Spawn many tasks
     let tasks = FuturesUnordered::new();
     for file in files {
         let handle = tokio::spawn(get_and_compare_cropped(
             file,
-            croppedptr,
-            keypointsptr,
-            descriptorsptr,
+            &cropped,
+            &keypoints,
+            &descriptors,
         ));
         tasks.push(handle);
     }
