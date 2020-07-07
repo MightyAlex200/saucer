@@ -560,6 +560,7 @@ name = "saucer"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "lazy_static",
  "opencv",
  "serde",
  "serde_json",

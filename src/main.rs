@@ -1,4 +1,5 @@
 use futures::stream::FuturesUnordered;
+use lazy_static::lazy_static;
 use opencv::prelude::*;
 use opencv::{
     calib3d::{find_homography, RANSAC},
@@ -13,8 +14,16 @@ use opencv::{
 };
 use serde::Deserialize;
 use std::{thread_local, time::Instant};
-use tokio::stream::StreamExt;
+use tokio::{stream::StreamExt, sync::Semaphore};
 use walkdir::{DirEntry, WalkDir};
+
+const MAX_CACHE_LOADED: usize = 100;
+const MAX_IMAGES_LOADED: usize = 30;
+
+lazy_static! {
+    static ref CACHE_SEMAPHORE: Semaphore = Semaphore::new(MAX_CACHE_LOADED);
+    static ref IMAGE_LOAD_SEMAPHORE: Semaphore = Semaphore::new(MAX_IMAGES_LOADED);
+}
 
 #[derive(Copy, Clone)]
 struct MatPtr<'a>(&'a Mat);
@@ -94,6 +103,7 @@ async fn get_and_compare_cropped<'a>(
     cropped_keypoints: KeyPointsPtr<'a>,
     descriptors: MatPtr<'a>,
 ) -> Option<(String, f64)> {
+    let cache_permit = CACHE_SEMAPHORE.acquire().await;
     // Read file
     let f = tokio::fs::read_to_string(file.path()).await.ok()?;
     let kpdcache: KPDCache = serde_json::from_str(&f[..]).ok()?;
@@ -143,6 +153,7 @@ async fn get_and_compare_cropped<'a>(
         5.,
     )
     .ok()?;
+    let permit = IMAGE_LOAD_SEMAPHORE.acquire().await;
     let uncropped_bytes: Vector<u8> =
         Vector::from_iter(tokio::fs::read(&kpd.0[..]).await.ok()?.into_iter());
     let cropped = cropped.0;
@@ -162,6 +173,8 @@ async fn get_and_compare_cropped<'a>(
     .ok()?;
     assert_eq!(dst.typ().unwrap(), cropped.typ().unwrap());
     let diff = difference_between(&cropped, &dst);
+    drop(cache_permit);
+    drop(permit);
     Some((kpd.0, diff))
 }
 
@@ -190,6 +203,7 @@ async fn get_uncropped(cropped: Mat) -> Option<(String, f64)> {
 
     // This is extremely unsafe, but since Mat isn't Sync it's the best that we can do
     // Technically this is safe because croppedptr is only used while cropped is still in scope
+    // TODO: ReadOnlyMat wrapper if possible
     let croppedptr = unsafe { MatPtr::new((&cropped as *const Mat).as_ref().unwrap()) };
     let descriptorsptr = unsafe { MatPtr::new((&descriptors as *const Mat).as_ref().unwrap()) };
     let keypointsptr =
