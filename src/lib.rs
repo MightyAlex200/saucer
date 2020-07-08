@@ -14,37 +14,37 @@ use opencv::{
     xfeatures2d::SIFT,
 };
 use readonly::{ReadOnlyMat, ReadOnlyVector};
-use serde::Deserialize;
-use std::{sync::Arc, thread_local, time::Instant};
+use serde::{Deserialize, Serialize};
+use std::{sync::Arc, thread_local};
 use tokio::{stream::StreamExt, sync::Semaphore};
 use walkdir::{DirEntry, WalkDir};
 
 mod readonly;
 
-const MAX_CACHE_LOADED: usize = 100;
-const MAX_IMAGES_LOADED: usize = 30;
+const MAX_CACHE_LOADED: usize = 1; //100;
+const MAX_IMAGES_LOADED: usize = 1; //30;
 
 lazy_static! {
     static ref CACHE_SEMAPHORE: Semaphore = Semaphore::new(MAX_CACHE_LOADED);
     static ref IMAGE_LOAD_SEMAPHORE: Semaphore = Semaphore::new(MAX_IMAGES_LOADED);
 }
 
-fn new_sift() -> Ptr<SIFT> {
+pub fn new_sift() -> Ptr<SIFT> {
     SIFT::create(0, 3, 0.04, 10., 1.6).unwrap()
 }
 
-#[derive(Deserialize, Debug)]
-struct KP {
-    angle: f32,
-    class_id: i32,
-    octave: i32,
-    pt: (f32, f32),
-    response: f32,
-    size: f32,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct KP {
+    pub angle: f32,
+    pub class_id: i32,
+    pub octave: i32,
+    pub pt: (f32, f32),
+    pub response: f32,
+    pub size: f32,
 }
 
-#[derive(Deserialize, Debug)]
-struct KPDCache(String, Vec<KP>, Vec<Vec<f32>>);
+#[derive(Serialize, Deserialize, Debug)]
+pub struct KPDCache(pub String, pub Vec<KP>, pub Vec<Vec<f32>>);
 
 fn decode_kpd(cache: KPDCache) -> (String, Vector<KeyPoint>, Mat) {
     (
@@ -90,14 +90,26 @@ async fn get_and_compare_cropped<'a>(
     cropped_keypoints: Arc<ReadOnlyVector<KeyPoint>>,
     descriptors: Arc<ReadOnlyMat>,
 ) -> Option<(String, f64)> {
+    println!("1");
     let cache_permit = CACHE_SEMAPHORE.acquire().await;
+    println!("2");
     // Read file
     let f = tokio::fs::read_to_string(file.path()).await.ok()?;
+    println!("3");
     let kpdcache: KPDCache = serde_json::from_str(&f[..]).ok()?;
+    println!("4");
     let kpd = decode_kpd(kpdcache);
+    println!("5");
     // Use FLANN to find homography
     let matches = FLANN.with(|flann| {
+        println!("6");
         let mut matches = Vector::new();
+        println!("7");
+        println!(
+            "{} {}",
+            kpd.1.len(),
+            unsafe { cropped_keypoints.into_inner_ref() }.len()
+        );
         flann
             .knn_train_match(
                 &*descriptors,
@@ -110,27 +122,32 @@ async fn get_and_compare_cropped<'a>(
             .ok()?;
         Some(matches)
     })?;
+    println!("8");
     let mut good = Vec::new();
     for matc in matches {
         // matc is always 2 elements long because of the k value passed to knn_train_match
-        let m = unsafe { matc.get_unchecked(0) };
-        let n = unsafe { matc.get_unchecked(1) };
+        let m = matc.get(0).unwrap();
+        let n = matc.get(1).unwrap();
         if m.distance < 0.7 * n.distance {
             good.push(m);
         }
     }
+    println!("9");
     let good = good;
     if good.is_empty() {
         return None;
     }
+    println!("10");
     let uncropped_points: Vector<Point2f> = Vector::from_iter(
         good.iter()
             .map(|m| kpd.1.get(m.train_idx as usize).unwrap().pt),
     );
+    println!("11");
     let cropped_points: Vector<Point2f> = Vector::from_iter(
         good.iter()
             .map(|m| cropped_keypoints.get(m.query_idx as usize).unwrap().pt),
     );
+    println!("12");
     // Compare cropped and uncropped
     let m = find_homography(
         &cropped_points,
@@ -140,11 +157,14 @@ async fn get_and_compare_cropped<'a>(
         5.,
     )
     .ok()?;
+    println!("13");
     let permit = IMAGE_LOAD_SEMAPHORE.acquire().await;
+    println!("14");
     let uncropped_bytes: Vector<u8> =
         Vector::from_iter(tokio::fs::read(&kpd.0[..]).await.ok()?.into_iter());
+    println!("15");
     let uncropped_image = imdecode(&uncropped_bytes, ImreadModes::IMREAD_COLOR as i32).ok()?;
-    let uncropped_image = uncropped_image;
+    println!("16");
     // Unsafe because it exposes uninitialized memory, but we do not access it so there is no UB (🤞)
     let mut dst = unsafe { Mat::new_rows_cols(cropped.rows(), cropped.cols(), CV_8UC3).unwrap() };
     warp_perspective(
@@ -157,14 +177,16 @@ async fn get_and_compare_cropped<'a>(
         Scalar::default(),
     )
     .ok()?;
+    println!("17");
     assert_eq!(dst.typ().unwrap(), cropped.typ().unwrap());
     let diff = difference_between(&*cropped, &dst, cropped.rows(), cropped.cols());
+    println!("18");
     drop(cache_permit);
     drop(permit);
     Some((kpd.0, diff))
 }
 
-async fn get_uncropped(cropped: Mat) -> Option<(String, f64)> {
+pub async fn get_uncropped(cropped: Mat) -> Option<(String, f64)> {
     let files: Vec<_> = WalkDir::new("./prod/kpd_cache")
         .min_depth(2)
         .into_iter()
@@ -223,26 +245,4 @@ async fn get_uncropped(cropped: Mat) -> Option<(String, f64)> {
         }
     }
     best_match
-}
-
-#[tokio::main]
-async fn main() {
-    let start = Instant::now();
-    let cropped =
-        opencv::imgcodecs::imread("cropped.png", ImreadModes::IMREAD_COLOR as i32).unwrap();
-    match get_uncropped(cropped).await {
-        Some((filename, avg_diff)) => {
-            let stop = Instant::now();
-            let time = stop - start;
-            println!(
-                "Found closest file! {} Average difference was {}. Took {} seconds",
-                filename,
-                avg_diff,
-                time.as_secs()
-            );
-        }
-        None => {
-            println!("Was not able to find a single file that fit the image well enough.");
-        }
-    }
 }
