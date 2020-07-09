@@ -21,8 +21,8 @@ use walkdir::{DirEntry, WalkDir};
 
 mod readonly;
 
-const MAX_CACHE_LOADED: usize = 1; //100;
-const MAX_IMAGES_LOADED: usize = 1; //30;
+const MAX_CACHE_LOADED: usize = 200;
+const MAX_IMAGES_LOADED: usize = 60;
 
 lazy_static! {
     static ref CACHE_SEMAPHORE: Semaphore = Semaphore::new(MAX_CACHE_LOADED);
@@ -90,26 +90,14 @@ async fn get_and_compare_cropped<'a>(
     cropped_keypoints: Arc<ReadOnlyVector<KeyPoint>>,
     descriptors: Arc<ReadOnlyMat>,
 ) -> Option<(String, f64)> {
-    println!("1");
     let cache_permit = CACHE_SEMAPHORE.acquire().await;
-    println!("2");
     // Read file
     let f = tokio::fs::read(file.path()).await.ok()?;
-    println!("3");
     let kpdcache: KPDCache = bincode::deserialize(&f[..]).ok()?;
-    println!("4");
     let kpd = decode_kpd(kpdcache);
-    println!("5");
     // Use FLANN to find homography
     let matches = FLANN.with(|flann| {
-        println!("6");
         let mut matches = Vector::new();
-        println!("7");
-        println!(
-            "{} {}",
-            kpd.1.len(),
-            unsafe { cropped_keypoints.into_inner_ref() }.len()
-        );
         flann
             .knn_train_match(
                 &*descriptors,
@@ -119,35 +107,35 @@ async fn get_and_compare_cropped<'a>(
                 &no_array().unwrap(),
                 false,
             )
-            .ok()?;
+            .unwrap();
         Some(matches)
     })?;
-    println!("8");
     let mut good = Vec::new();
     for matc in matches {
-        // matc is always 2 elements long because of the k value passed to knn_train_match
-        let m = matc.get(0).unwrap();
-        let n = matc.get(1).unwrap();
+        let m = match matc.get(0) {
+            Ok(x) => x,
+            Err(_) => continue,
+        };
+        let n = match matc.get(1) {
+            Ok(x) => x,
+            Err(_) => continue,
+        };
         if m.distance < 0.7 * n.distance {
             good.push(m);
         }
     }
-    println!("9");
     let good = good;
     if good.is_empty() {
         return None;
     }
-    println!("10");
     let uncropped_points: Vector<Point2f> = Vector::from_iter(
         good.iter()
             .map(|m| kpd.1.get(m.train_idx as usize).unwrap().pt),
     );
-    println!("11");
     let cropped_points: Vector<Point2f> = Vector::from_iter(
         good.iter()
             .map(|m| cropped_keypoints.get(m.query_idx as usize).unwrap().pt),
     );
-    println!("12");
     // Compare cropped and uncropped
     let m = find_homography(
         &cropped_points,
@@ -157,14 +145,10 @@ async fn get_and_compare_cropped<'a>(
         5.,
     )
     .ok()?;
-    println!("13");
     let permit = IMAGE_LOAD_SEMAPHORE.acquire().await;
-    println!("14");
     let uncropped_bytes: Vector<u8> =
         Vector::from_iter(tokio::fs::read(&kpd.0[..]).await.ok()?.into_iter());
-    println!("15");
     let uncropped_image = imdecode(&uncropped_bytes, ImreadModes::IMREAD_COLOR as i32).ok()?;
-    println!("16");
     // Unsafe because it exposes uninitialized memory, but we do not access it so there is no UB (🤞)
     let mut dst = unsafe { Mat::new_rows_cols(cropped.rows(), cropped.cols(), CV_8UC3).unwrap() };
     warp_perspective(
@@ -177,10 +161,8 @@ async fn get_and_compare_cropped<'a>(
         Scalar::default(),
     )
     .ok()?;
-    println!("17");
     assert_eq!(dst.typ().unwrap(), cropped.typ().unwrap());
     let diff = difference_between(&*cropped, &dst, cropped.rows(), cropped.cols());
-    println!("18");
     drop(cache_permit);
     drop(permit);
     Some((kpd.0, diff))

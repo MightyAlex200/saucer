@@ -41,10 +41,10 @@ async fn main() {
 
 fn to_2d_vec(mat: Mat) -> Vec<Vec<f32>> {
     // TODO: this sucks
-    let mut outer_vec = Vec::with_capacity(mat.cols() as usize);
-    for col in 0..mat.cols() {
-        let mut inner_vec = Vec::with_capacity(mat.rows() as usize);
-        for row in 0..mat.rows() {
+    let mut outer_vec = Vec::with_capacity(mat.rows() as usize);
+    for row in 0..mat.rows() {
+        let mut inner_vec = Vec::with_capacity(mat.cols() as usize);
+        for col in 0..mat.cols() {
             // TODO: this might panic
             let val = mat.at_2d(row, col).unwrap();
             inner_vec.push(*val);
