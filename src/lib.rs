@@ -94,9 +94,9 @@ async fn get_and_compare_cropped<'a>(
     let cache_permit = CACHE_SEMAPHORE.acquire().await;
     println!("2");
     // Read file
-    let f = tokio::fs::read_to_string(file.path()).await.ok()?;
+    let f = tokio::fs::read(file.path()).await.ok()?;
     println!("3");
-    let kpdcache: KPDCache = serde_json::from_str(&f[..]).ok()?;
+    let kpdcache: KPDCache = bincode::deserialize(&f[..]).ok()?;
     println!("4");
     let kpd = decode_kpd(kpdcache);
     println!("5");

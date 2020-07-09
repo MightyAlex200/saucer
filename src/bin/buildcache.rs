@@ -11,7 +11,7 @@ use tokio::{io::AsyncWriteExt, sync::Semaphore};
 use walkdir::{DirEntry, WalkDir};
 
 lazy_static! {
-    static ref WORKING_SEMAPHORE: Semaphore = Semaphore::new(1);
+    static ref WORKING_SEMAPHORE: Semaphore = Semaphore::new(5);
 }
 
 #[tokio::main]
@@ -68,7 +68,7 @@ fn into_kp(keypoint: KeyPoint) -> KP {
 async fn build_cache_for_file(file: DirEntry) {
     let name = file.file_name().to_str().unwrap().to_owned();
     let prefix = &name[0..2];
-    let output_path = format!("./prod/kpd_cache/{}/{}.json", prefix, name);
+    let output_path = format!("./prod/kpd_cache/{}/{}.bc", prefix, name);
     if tokio::fs::metadata(&output_path).await.is_ok() {
         return;
     }
@@ -101,7 +101,7 @@ async fn build_cache_for_file(file: DirEntry) {
         let serialized_descriptors = to_2d_vec(descriptors);
         cache = KPDCache(filename.clone(), kps, serialized_descriptors);
     }
-    let serialized_bytes = serde_json::to_vec(&cache).unwrap();
+    let serialized_bytes = bincode::serialize(&cache).unwrap();
     tokio::fs::create_dir(format!("./prod/kpd_cache/{}", prefix))
         .await
         .ok();
