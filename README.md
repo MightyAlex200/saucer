@@ -2,8 +2,6 @@
 This is an application to find the original uncropped image in a local database from a cropped image.
 It uses OpenCVs implementation of SIFT for feature detection, and FLANN for feature matching.
 
-It's new implementation is written in Rust, but some python notebooks currently exist to set up the database cache.
-
 ## Installation of OpenCV and Compilation
 SIFT is not included in OpenCV by default, because it is not a free algorithm. You must build your own version of OpenCV.
 This document will not explain how to do that, but here are some cmake flags you will probably need:
@@ -26,13 +24,13 @@ There is no included software to do this, if you do not already have software th
 ## Database cache
 Feature detection is very computationally expensive, and doing it on every query is highly inefficient.
 To get around this, the program uses a cache of json files to store the results of SIFT feature detection.
-To build the cache, open `generate_prod_cache.ipynb` in a python notebook (e.g. Jupyter Lab) and run the cells in order.
+To build the cache, run `cargo run --release --bin buildcache`
 Depending on how many images you have this may take some time.
 
 ## Usage
 The program is not finished yet, so usage is not user friendly at the moment.
-To use the Rust version, create a file named `cropped.png`, then run
+To use the the cli program, create a file named `cropped.png`, then run
 ```
-cargo run --release
+cargo run --release --bin cli
 ```
 To search for the uncropped image in the database.
