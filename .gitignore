@@ -1,8 +1,4 @@
-test/cropped/*
-test/uncropped/*
 prod/kpd_cache/*
 prod/sources/*
 cropped.png
-.ipynb_checkpoints
-__pycache__
 /target
